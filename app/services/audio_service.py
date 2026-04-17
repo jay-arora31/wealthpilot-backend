@@ -10,6 +10,9 @@ Audio ingestion pipeline.
    (trim whitespace, case-fold free-text, compare numerics as Decimals).
 5. Persist the source quote alongside each conflict so the advisor sees
    exactly why the change was proposed.
+6. Also persist NEW members and NEW accounts extracted from the transcript,
+   and raise conflicts when extracted member/account fields contradict
+   existing stored values.
 """
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -19,27 +22,35 @@ from fastapi import HTTPException, UploadFile
 from openai import AsyncOpenAI
 
 from app.agents.audio_extraction import (
+    ExtractedAccount,
     ExtractedHouseholdData,
+    ExtractedMember,
     audio_extraction_agent,
     build_extraction_prompt,
 )
 from app.core import jobs as job_store
 from app.core.config import settings
+from app.repositories.account_repo import AccountRepository
 from app.repositories.household_repo import HouseholdRepository
+from app.repositories.member_repo import MemberRepository
+from app.schemas.account import AccountCreate, OwnershipCreate
+from app.schemas.member import MemberCreate
 from app.services.conflict_service import ConflictService
 
-# Upload guardrails — fail fast before spending a Whisper call.
 MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB (Whisper's own per-file limit)
 MIN_AUDIO_BYTES = 1024  # reject empty/near-empty files
-ALLOWED_AUDIO_PREFIXES = ("audio/", "video/")  # video/* is allowed because .mp4/.webm often carry audio
+ALLOWED_AUDIO_PREFIXES = ("audio/", "video/")  # video/* often carries audio
 MIN_TRANSCRIPT_WORDS = 3
 
 NUMERIC_FIELDS = {"income", "net_worth", "liquid_net_worth"}
-# Fields where we treat the extracted text case-insensitively before comparing.
 CASE_INSENSITIVE_FIELDS = {"risk_tolerance", "preferences", "tax_bracket"}
 FINANCIAL_FIELDS = [
     "income", "net_worth", "liquid_net_worth", "expense_range",
     "tax_bracket", "risk_tolerance", "time_horizon", "goals", "preferences",
+]
+# Member fields we compare (name is the matching key, so we diff everything else).
+MEMBER_DIFF_FIELDS = [
+    "date_of_birth", "email", "phone", "member_relationship", "address",
 ]
 
 
@@ -64,9 +75,17 @@ def _normalize_for_compare(field: str, value) -> str | None:
 
 
 class AudioService:
-    def __init__(self, household_repo: HouseholdRepository, conflict_service: ConflictService) -> None:
+    def __init__(
+        self,
+        household_repo: HouseholdRepository,
+        conflict_service: ConflictService,
+        member_repo: MemberRepository,
+        account_repo: AccountRepository,
+    ) -> None:
         self.household_repo = household_repo
         self.conflict_service = conflict_service
+        self.member_repo = member_repo
+        self.account_repo = account_repo
         self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
     @logfire.instrument("audio.process_audio", extract_args=False)
@@ -127,6 +146,8 @@ class AudioService:
                 "transcript_text": transcript_text,
                 "updates_applied": 0,
                 "conflicts_created": 0,
+                "members_added": 0,
+                "accounts_added": 0,
             }
 
         _step("Running GPT extraction with household context…")
@@ -136,8 +157,74 @@ class AudioService:
         with logfire.span("audio.gpt_extraction", household_id=str(household_id)):
             result = await audio_extraction_agent.run(prompt)
         extracted: ExtractedHouseholdData = result.output
-        _step("Extraction complete — comparing against existing data…")
+        _step(
+            "Extraction complete — "
+            f"{sum(1 for f in FINANCIAL_FIELDS if getattr(extracted, f) is not None)} household fields, "
+            f"{len(extracted.members)} member(s), "
+            f"{len(extracted.financial_accounts)} account(s)"
+        )
 
+        # ── 1. Household-level fields ───────────────────────────────
+        updates_applied, conflicts_created = await self._apply_household_fields(
+            household_id, household, extracted, _step
+        )
+
+        # ── 2. Members ──────────────────────────────────────────────
+        members_added, member_id_by_name, member_conflicts = await self._apply_members(
+            household_id, extracted.members, _step
+        )
+        conflicts_created += member_conflicts
+
+        # ── 3. Financial accounts ───────────────────────────────────
+        accounts_added = await self._apply_accounts(
+            household_id, extracted.financial_accounts, member_id_by_name, _step
+        )
+
+        # Single transaction for everything extracted from this transcript.
+        # All prior writes used commit=False; we commit once so the whole audio
+        # ingest is atomic and we only pay one pgbouncer connect round-trip.
+        try:
+            await self.household_repo.db.commit()
+        except Exception as exc:
+            await self.household_repo.db.rollback()
+            logfire.error(
+                "audio.commit_failed",
+                household_id=str(household_id),
+                error=str(exc),
+            )
+            raise
+
+        logfire.info(
+            "audio.processing_complete",
+            household_id=str(household_id),
+            updates_applied=updates_applied,
+            conflicts_created=conflicts_created,
+            members_added=members_added,
+            accounts_added=accounts_added,
+        )
+        _step(
+            f"Done — {updates_applied} household update{'s' if updates_applied != 1 else ''}, "
+            f"{members_added} member{'s' if members_added != 1 else ''} added, "
+            f"{accounts_added} account{'s' if accounts_added != 1 else ''} added, "
+            f"{conflicts_created} conflict{'s' if conflicts_created != 1 else ''} flagged"
+        )
+
+        return {
+            "transcript_text": transcript_text,
+            "updates_applied": updates_applied,
+            "conflicts_created": conflicts_created,
+            "members_added": members_added,
+            "accounts_added": accounts_added,
+        }
+
+    async def _apply_household_fields(
+        self,
+        household_id: uuid.UUID,
+        household,
+        extracted: ExtractedHouseholdData,
+        _step,
+    ) -> tuple[int, int]:
+        """Apply direct updates for empty fields, raise conflicts for differing ones."""
         updates_applied = 0
         conflicts_created = 0
         direct_updates: dict = {}
@@ -165,26 +252,153 @@ class AudioService:
                 incoming=str(incoming_val),
                 source="audio",
                 source_quote=quote,
+                commit=False,
             )
             conflicts_created += 1
             _step(f"Conflict flagged → {field}: {existing_val!r} vs {incoming_val!r}")
 
         if direct_updates:
-            await self.household_repo.update(household_id, direct_updates)
+            await self.household_repo.update(household_id, direct_updates, commit=False)
 
-        logfire.info(
-            "audio.processing_complete",
-            household_id=str(household_id),
-            updates_applied=updates_applied,
-            conflicts_created=conflicts_created,
-        )
-        _step(
-            f"Done — {updates_applied} update{'s' if updates_applied != 1 else ''} applied, "
-            f"{conflicts_created} conflict{'s' if conflicts_created != 1 else ''} flagged"
-        )
+        return updates_applied, conflicts_created
 
-        return {
-            "transcript_text": transcript_text,
-            "updates_applied": updates_applied,
-            "conflicts_created": conflicts_created,
-        }
+    async def _apply_members(
+        self,
+        household_id: uuid.UUID,
+        members: list[ExtractedMember],
+        _step,
+    ) -> tuple[int, dict[str, uuid.UUID], int]:
+        """Create NEW members; backfill null fields on existing ones; flag conflicts
+        when extracted values differ from existing non-null values.
+
+        Returns (members_added, name → member_id map, conflicts_created).
+        """
+        members_added = 0
+        conflicts_created = 0
+        name_to_id: dict[str, uuid.UUID] = {}
+
+        for m in members:
+            raw_name = (m.name or "").strip()
+            if not raw_name:
+                continue
+
+            existing = await self.member_repo.find_by_name_in_household(
+                household_id, raw_name, date_of_birth=m.date_of_birth
+            )
+
+            if existing is None:
+                created = await self.member_repo.create(
+                    household_id,
+                    MemberCreate(
+                        name=raw_name,
+                        date_of_birth=m.date_of_birth,
+                        email=m.email,
+                        phone=m.phone,
+                        member_relationship=m.member_relationship,
+                        address=m.address,
+                    ),
+                    commit=False,
+                )
+                members_added += 1
+                name_to_id[raw_name.lower()] = created.id
+                _step(f"Member added → {raw_name}")
+                continue
+
+            # Existing member — backfill null fields, conflict on differing ones.
+            name_to_id[raw_name.lower()] = existing.id
+            backfill: dict = {}
+            for field in MEMBER_DIFF_FIELDS:
+                incoming = getattr(m, field)
+                if incoming is None:
+                    continue
+                existing_val = getattr(existing, field)
+                if existing_val is None:
+                    backfill[field] = incoming
+                    continue
+                if str(existing_val).strip().casefold() == str(incoming).strip().casefold():
+                    continue
+                # Differ — flag as a conflict. We scope the field name to the member
+                # so the advisor knows which record is affected.
+                field_label = f"member:{raw_name}:{field}"
+                await self.conflict_service.create_conflict(
+                    household_id=household_id,
+                    field=field_label,
+                    existing=str(existing_val),
+                    incoming=str(incoming),
+                    source="audio",
+                    source_quote=m.source_quote,
+                    commit=False,
+                )
+                conflicts_created += 1
+                _step(f"Conflict flagged → {field_label}: {existing_val!r} vs {incoming!r}")
+
+            if backfill:
+                await self.member_repo.update(existing.id, backfill, commit=False)
+                _step(f"Member backfilled → {raw_name}: {', '.join(backfill.keys())}")
+
+        return members_added, name_to_id, conflicts_created
+
+    async def _apply_accounts(
+        self,
+        household_id: uuid.UUID,
+        accounts: list[ExtractedAccount],
+        member_id_by_name: dict[str, uuid.UUID],
+        _step,
+    ) -> int:
+        """Create accounts that don't already exist on the household. Dedup by
+        account_number when present, else by account_type + custodian."""
+        accounts_added = 0
+
+        for acc in accounts:
+            existing = None
+            if acc.account_number:
+                existing = await self.account_repo.find_by_account_number(
+                    household_id, acc.account_number
+                )
+            elif acc.account_type:
+                existing = await self.account_repo.find_by_type_in_household(
+                    household_id, acc.account_type
+                )
+                # Same type but different custodian → treat as a DIFFERENT account
+                # (e.g. multiple brokerage accounts at different firms).
+                if existing and acc.custodian and existing.custodian:
+                    if existing.custodian.strip().casefold() != acc.custodian.strip().casefold():
+                        existing = None
+
+            if existing:
+                continue
+            if not (acc.account_number or acc.account_type or acc.custodian):
+                continue  # nothing to anchor on — skip
+
+            ownerships: list[OwnershipCreate] = []
+            for owner in acc.owner_names:
+                member_id = member_id_by_name.get(owner.strip().lower())
+                if member_id is None:
+                    # Try a looser lookup against the existing household roster.
+                    found = await self.member_repo.find_by_name_in_household(
+                        household_id, owner
+                    )
+                    if found:
+                        member_id = found.id
+                        member_id_by_name[owner.strip().lower()] = found.id
+                if member_id is not None:
+                    ownerships.append(
+                        OwnershipCreate(member_id=member_id, ownership_percentage=None)
+                    )
+
+            await self.account_repo.create(
+                household_id,
+                AccountCreate(
+                    account_number=acc.account_number,
+                    custodian=acc.custodian,
+                    account_type=acc.account_type,
+                    account_value=acc.account_value,
+                    ownerships=ownerships,
+                ),
+                commit=False,
+            )
+            accounts_added += 1
+            descriptor = acc.account_type or acc.custodian or "account"
+            _step(f"Account added → {descriptor}")
+
+        return accounts_added

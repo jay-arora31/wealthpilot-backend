@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     OPENAI_API_KEY: str
     LOGFIRE_API_KEY: str = ""
+    # When true, Logfire instruments SQLAlchemy and emits a span for every
+    # SELECT/INSERT/UPDATE/DELETE and every connection checkout. Extremely
+    # noisy during bulk Excel/audio ingests, so default is off; flip to true
+    # when debugging slow/broken queries.
+    LOGFIRE_INSTRUMENT_SQL: bool = False
     # Comma-separated list of allowed CORS origins.
     # Defaults to localhost dev server; override in production via env var.
     ALLOWED_ORIGINS: str = "http://localhost:5173"

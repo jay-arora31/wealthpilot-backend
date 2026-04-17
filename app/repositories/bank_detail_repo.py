@@ -19,25 +19,36 @@ class BankDetailRepository:
         result = await self.db.execute(select(BankDetail).where(BankDetail.id == id))
         return result.scalar_one_or_none()
 
-    async def update(self, bank_id: uuid.UUID, data: dict) -> BankDetail | None:
+    async def update(
+        self, bank_id: uuid.UUID, data: dict, commit: bool = True
+    ) -> BankDetail | None:
         bd = await self.get_by_id(bank_id)
         if not bd:
             return None
         for key, value in data.items():
             setattr(bd, key, value)
-        await self.db.commit()
-        await self.db.refresh(bd)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(bd)
+        else:
+            await self.db.flush()
         return bd
 
-    async def delete(self, bank_id: uuid.UUID) -> None:
+    async def delete(self, bank_id: uuid.UUID, commit: bool = True) -> None:
         bd = await self.get_by_id(bank_id)
         if bd:
             await self.db.delete(bd)
-            await self.db.commit()
+            if commit:
+                await self.db.commit()
 
-    async def create(self, household_id: uuid.UUID, data: BankDetailCreate) -> BankDetail:
+    async def create(
+        self, household_id: uuid.UUID, data: BankDetailCreate, commit: bool = True
+    ) -> BankDetail:
         bd = BankDetail(household_id=household_id, **data.model_dump())
         self.db.add(bd)
-        await self.db.commit()
-        await self.db.refresh(bd)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(bd)
+        else:
+            await self.db.flush()
         return bd

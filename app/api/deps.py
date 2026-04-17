@@ -8,6 +8,7 @@ from app.repositories.conflict_repo import ConflictRepository
 from app.repositories.household_repo import HouseholdRepository
 from app.repositories.insight_repo import InsightRepository
 from app.repositories.member_repo import MemberRepository
+from app.services.admin_service import AdminService
 from app.services.audio_service import AudioService
 from app.services.conflict_service import ConflictService
 from app.services.excel_service import ExcelService
@@ -39,8 +40,9 @@ async def get_conflict_repo(db: AsyncSession = Depends(get_db)) -> ConflictRepos
 async def get_conflict_service(
     conflict_repo: ConflictRepository = Depends(get_conflict_repo),
     household_repo: HouseholdRepository = Depends(get_household_repo),
+    member_repo: MemberRepository = Depends(get_member_repo),
 ) -> ConflictService:
-    return ConflictService(conflict_repo, household_repo)
+    return ConflictService(conflict_repo, household_repo, member_repo)
 
 
 async def get_household_service(
@@ -69,8 +71,10 @@ async def get_excel_service(
 async def get_audio_service(
     household_repo: HouseholdRepository = Depends(get_household_repo),
     conflict_service: ConflictService = Depends(get_conflict_service),
+    member_repo: MemberRepository = Depends(get_member_repo),
+    account_repo: AccountRepository = Depends(get_account_repo),
 ) -> AudioService:
-    return AudioService(household_repo, conflict_service)
+    return AudioService(household_repo, conflict_service, member_repo, account_repo)
 
 
 async def get_insight_repo(db: AsyncSession = Depends(get_db)) -> InsightRepository:
@@ -81,3 +85,7 @@ async def get_insight_service(
     repo: InsightRepository = Depends(get_insight_repo),
 ) -> InsightService:
     return InsightService(repo)
+
+
+async def get_admin_service(db: AsyncSession = Depends(get_db)) -> AdminService:
+    return AdminService(db)

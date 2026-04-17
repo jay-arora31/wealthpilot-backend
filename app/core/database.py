@@ -57,10 +57,11 @@ engine = create_async_engine(
     },
 )
 
-try:
-    logfire.instrument_sqlalchemy(engine=engine)
-except Exception as exc:
-    logger.warning("logfire SQLAlchemy instrumentation failed: %s", exc)
+if settings.LOGFIRE_INSTRUMENT_SQL:
+    try:
+        logfire.instrument_sqlalchemy(engine=engine)
+    except Exception as exc:
+        logger.warning("logfire SQLAlchemy instrumentation failed: %s", exc)
 
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

@@ -45,23 +45,31 @@ class AccountRepository:
         result = await self.db.execute(select(FinancialAccount).where(FinancialAccount.id == id))
         return result.scalar_one_or_none()
 
-    async def update(self, account_id: uuid.UUID, data: dict) -> FinancialAccount | None:
+    async def update(
+        self, account_id: uuid.UUID, data: dict, commit: bool = True
+    ) -> FinancialAccount | None:
         account = await self.get_by_id(account_id)
         if not account:
             return None
         for key, value in data.items():
             setattr(account, key, value)
-        await self.db.commit()
-        await self.db.refresh(account)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(account)
+        else:
+            await self.db.flush()
         return account
 
-    async def delete(self, account_id: uuid.UUID) -> None:
+    async def delete(self, account_id: uuid.UUID, commit: bool = True) -> None:
         account = await self.get_by_id(account_id)
         if account:
             await self.db.delete(account)
-            await self.db.commit()
+            if commit:
+                await self.db.commit()
 
-    async def create(self, household_id: uuid.UUID, data: AccountCreate) -> FinancialAccount:
+    async def create(
+        self, household_id: uuid.UUID, data: AccountCreate, commit: bool = True
+    ) -> FinancialAccount:
         account_data = data.model_dump(exclude={"ownerships"})
         account = FinancialAccount(household_id=household_id, **account_data)
         self.db.add(account)
@@ -75,6 +83,9 @@ class AccountRepository:
             )
             self.db.add(ao)
 
-        await self.db.commit()
-        await self.db.refresh(account)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(account)
+        else:
+            await self.db.flush()
         return account

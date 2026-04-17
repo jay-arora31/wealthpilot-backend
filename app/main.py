@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # config must be imported first so LOGFIRE_TOKEN is set in the environment
 from app.core.config import settings  # noqa: F401 — side-effect: sets env vars
-from app.api.routes import accounts, bank_details, conflicts, households, jobs, members
+from app.api.routes import accounts, admin, bank_details, conflicts, households, jobs, members
 
 logger = logging.getLogger(__name__)
 
@@ -40,3 +40,4 @@ app.include_router(accounts.router, prefix="/api", tags=["Accounts"])
 app.include_router(conflicts.router, prefix="/api", tags=["Conflicts"])
 app.include_router(bank_details.router, prefix="/api", tags=["BankDetails"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
+app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])

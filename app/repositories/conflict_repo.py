@@ -49,6 +49,7 @@ class ConflictRepository:
         incoming_value: str | None,
         source: str,
         source_quote: str | None = None,
+        commit: bool = True,
     ) -> DataConflict:
         # Skip if an identical pending conflict (same field + value + source) already exists
         duplicate = await self.find_pending_duplicate(
@@ -67,18 +68,24 @@ class ConflictRepository:
             status="pending",
         )
         self.db.add(conflict)
-        await self.db.commit()
-        await self.db.refresh(conflict)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(conflict)
+        else:
+            await self.db.flush()
         return conflict
 
-    async def resolve(self, id: uuid.UUID, action: str) -> DataConflict | None:
+    async def resolve(self, id: uuid.UUID, action: str, commit: bool = True) -> DataConflict | None:
         conflict = await self.get_by_id(id)
         if not conflict:
             return None
         conflict.status = "accepted" if action == "accept" else "rejected"
         conflict.resolved_at = datetime.now(UTC).replace(tzinfo=None)
-        await self.db.commit()
-        await self.db.refresh(conflict)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(conflict)
+        else:
+            await self.db.flush()
         return conflict
 
     async def count_pending(self, household_id: uuid.UUID) -> int:

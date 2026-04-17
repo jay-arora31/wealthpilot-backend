@@ -70,7 +70,9 @@ async def upload_excel(
                     member_repo=MemberRepository(db),
                     account_repo=AccountRepository(db),
                     bank_detail_repo=BankDetailRepository(db),
-                    conflict_service=ConflictService(ConflictRepository(db), HouseholdRepository(db)),
+                    conflict_service=ConflictService(
+                        ConflictRepository(db), HouseholdRepository(db), MemberRepository(db)
+                    ),
                 )
                 fake_file = StarletteUploadFile(
                     filename=filename,
@@ -136,8 +138,10 @@ async def upload_audio(
         import io
         from starlette.datastructures import UploadFile as StarletteUploadFile
         from app.core.database import async_session_factory
+        from app.repositories.account_repo import AccountRepository
         from app.repositories.household_repo import HouseholdRepository
         from app.repositories.conflict_repo import ConflictRepository
+        from app.repositories.member_repo import MemberRepository
         from app.services.conflict_service import ConflictService
 
         try:
@@ -145,7 +149,11 @@ async def upload_audio(
             async with async_session_factory() as db:
                 svc = AudioService(
                     household_repo=HouseholdRepository(db),
-                    conflict_service=ConflictService(ConflictRepository(db), HouseholdRepository(db)),
+                    conflict_service=ConflictService(
+                        ConflictRepository(db), HouseholdRepository(db), MemberRepository(db)
+                    ),
+                    member_repo=MemberRepository(db),
+                    account_repo=AccountRepository(db),
                 )
                 fake_file = StarletteUploadFile(
                     filename=filename,

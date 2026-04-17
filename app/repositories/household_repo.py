@@ -51,29 +51,39 @@ class HouseholdRepository:
         )
         return result.scalar_one_or_none()
 
-    async def create(self, data: HouseholdCreate) -> Household:
+    async def create(self, data: HouseholdCreate, commit: bool = True) -> Household:
         household = Household(**data.model_dump())
         self.db.add(household)
-        await self.db.commit()
-        await self.db.refresh(household)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(household)
+        else:
+            # Flush populates the generated PK without ending the transaction,
+            # so callers that are batching multiple writes can keep a single
+            # connection/transaction across repo calls.
+            await self.db.flush()
         return household
 
-    async def update(self, id: uuid.UUID, data: dict) -> Household | None:
+    async def update(self, id: uuid.UUID, data: dict, commit: bool = True) -> Household | None:
         household = await self.get_by_id(id)
         if not household:
             return None
         for key, value in data.items():
             if value is not None:
                 setattr(household, key, value)
-        await self.db.commit()
-        await self.db.refresh(household)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(household)
+        else:
+            await self.db.flush()
         return household
 
-    async def delete(self, id: uuid.UUID) -> None:
+    async def delete(self, id: uuid.UUID, commit: bool = True) -> None:
         household = await self.get_by_id(id)
         if household:
             await self.db.delete(household)
-            await self.db.commit()
+            if commit:
+                await self.db.commit()
 
     async def count_members(self, household_id: uuid.UUID) -> int:
         result = await self.db.execute(

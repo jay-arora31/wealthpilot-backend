@@ -245,6 +245,13 @@ class ExcelService:
                     continue
                 household_name = household_name.strip()
 
+                # Everything written for this row goes into a single transaction.
+                # Repos flush (to get back generated IDs) but don't commit; we
+                # commit once at the bottom of the row. This collapses ~14
+                # per-row transactions into 1, removing a matching number of
+                # pgbouncer reconnects per Excel row.
+                db_session = self.household_repo.db
+
                 agg = hh_aggregated.get(household_name, {})
                 household_data = HouseholdCreate(
                     name=household_name,
@@ -290,6 +297,7 @@ class ExcelService:
                             existing=str(existing_val) if existing_val is not None else None,
                             incoming=str(incoming_val),
                             source="excel",
+                            commit=False,
                         )
                         conflicts_count += 1
                         row_conflicts += 1
@@ -312,11 +320,14 @@ class ExcelService:
                                     member_relationship=_safe_str(_get_col(row, mapping.member_relationship)),
                                     address=_safe_str(_get_col(row, mapping.member_address)),
                                 ),
+                                commit=False,
                             )
                         else:
                             # Backfill missing DOB if this row provides one
                             if member_dob and existing_member.date_of_birth is None:
-                                await self.member_repo.update_dob(existing_member.id, member_dob)
+                                await self.member_repo.update_dob(
+                                    existing_member.id, member_dob, commit=False
+                                )
                             enrich_member = existing_member
 
                     # Add accounts that don't already exist on the household
@@ -348,6 +359,7 @@ class ExcelService:
                                     account_value=_safe_decimal(_get_col(row, mapping.account_value)),
                                     ownerships=ownerships,
                                 ),
+                                commit=False,
                             )
 
                     if household_name not in enriched_names:
@@ -356,7 +368,9 @@ class ExcelService:
                         conflict_note = f" ({row_conflicts} conflicts)" if row_conflicts else ""
                         _step(f"Enriched: '{household_name}'{conflict_note}")
                 else:
-                    new_household = await self.household_repo.create(household_data)
+                    new_household = await self.household_repo.create(
+                        household_data, commit=False
+                    )
 
                     member_name = _resolve_member_name(row, mapping)
                     member = None
@@ -376,10 +390,13 @@ class ExcelService:
                                     member_relationship=_safe_str(_get_col(row, mapping.member_relationship)),
                                     address=_safe_str(_get_col(row, mapping.member_address)),
                                 ),
+                                commit=False,
                             )
                         else:
                             if member_dob and existing_new_member.date_of_birth is None:
-                                await self.member_repo.update_dob(existing_new_member.id, member_dob)
+                                await self.member_repo.update_dob(
+                                    existing_new_member.id, member_dob, commit=False
+                                )
                             member = existing_new_member
                         account_number = _safe_str(_get_col(row, mapping.account_number))
                         account_type = _safe_str(_get_col(row, mapping.account_type))
@@ -412,6 +429,7 @@ class ExcelService:
                                         account_value=_safe_decimal(_get_col(row, mapping.account_value)),
                                         ownerships=ownerships,
                                     ),
+                                    commit=False,
                                 )
 
                     bank_name = _safe_str(_get_col(row, mapping.bank_name))
@@ -423,12 +441,28 @@ class ExcelService:
                                 account_number=_safe_str(_get_col(row, mapping.bank_account_number)),
                                 routing_number=_safe_str(_get_col(row, mapping.routing_number)),
                             ),
+                            commit=False,
                         )
 
                     if household_name not in created_names:
                         created_names.add(household_name)
                         created += 1
                         _step(f"Created: '{household_name}'")
+
+                # Commit everything accumulated for this row in a single
+                # transaction. On failure, roll back the row and keep going so
+                # one bad row doesn't abort the whole upload.
+                try:
+                    await db_session.commit()
+                except Exception as exc:
+                    await db_session.rollback()
+                    logfire.warning(
+                        "excel.row_commit_failed",
+                        sheet=sheet_name,
+                        household=household_name,
+                        error=str(exc),
+                    )
+                    _step(f"Row failed for '{household_name}' — rolled back ({exc})")
 
         summary = {
             "created": created,

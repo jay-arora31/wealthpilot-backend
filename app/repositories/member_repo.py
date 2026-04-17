@@ -19,34 +19,50 @@ class MemberRepository:
         result = await self.db.execute(select(Member).where(Member.id == id))
         return result.scalar_one_or_none()
 
-    async def create(self, household_id: uuid.UUID, data: MemberCreate) -> Member:
+    async def create(
+        self, household_id: uuid.UUID, data: MemberCreate, commit: bool = True
+    ) -> Member:
         member = Member(household_id=household_id, **data.model_dump())
         self.db.add(member)
-        await self.db.commit()
-        await self.db.refresh(member)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(member)
+        else:
+            await self.db.flush()
         return member
 
-    async def update(self, member_id: uuid.UUID, data: dict) -> Member | None:
+    async def update(
+        self, member_id: uuid.UUID, data: dict, commit: bool = True
+    ) -> Member | None:
         member = await self.get_by_id(member_id)
         if not member:
             return None
         for key, value in data.items():
             setattr(member, key, value)
-        await self.db.commit()
-        await self.db.refresh(member)
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(member)
+        else:
+            await self.db.flush()
         return member
 
-    async def delete(self, member_id: uuid.UUID) -> None:
+    async def delete(self, member_id: uuid.UUID, commit: bool = True) -> None:
         member = await self.get_by_id(member_id)
         if member:
             await self.db.delete(member)
-            await self.db.commit()
+            if commit:
+                await self.db.commit()
 
-    async def update_dob(self, member_id: uuid.UUID, date_of_birth: str) -> None:
+    async def update_dob(
+        self, member_id: uuid.UUID, date_of_birth: str, commit: bool = True
+    ) -> None:
         member = await self.get_by_id(member_id)
         if member:
             member.date_of_birth = date_of_birth
-            await self.db.commit()
+            if commit:
+                await self.db.commit()
+            else:
+                await self.db.flush()
 
     async def find_by_name_in_household(
         self,
