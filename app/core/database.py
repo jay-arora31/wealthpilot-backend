@@ -30,14 +30,25 @@ logger = logging.getLogger(__name__)
 #
 # Alembic migrations should use the direct connection (port 5432), NOT this
 # pooler — pgbouncer doesn't support advisory locks used by migrations.
+# Pool sizing:
+#   - pool_size=5, max_overflow=15 → up to 20 concurrent DB connections per
+#     Cloud Run instance. Background tasks (Excel/audio upload processing)
+#     can hold a connection for minutes while calling OpenAI, so we need
+#     headroom above pool_size for concurrent web requests.
+#   - pool_pre_ping is intentionally OFF. With pgbouncer transaction mode the
+#     pre-ping lands on a different backend than the real query, adding an
+#     extra network round-trip per checkout without actually validating
+#     anything. pool_recycle handles staleness instead.
+#   - pool_recycle=600 (10 min) is well below pgbouncer's idle timeout so we
+#     recycle proactively and avoid picking up a server-closed connection.
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_size=5,
-    max_overflow=5,
+    max_overflow=15,
     pool_timeout=10,
-    pool_recycle=1800,
-    pool_pre_ping=True,
+    pool_recycle=600,
+    pool_pre_ping=False,
     connect_args={
         "statement_cache_size": 0,
         "prepared_statement_cache_size": 0,
