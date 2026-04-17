@@ -49,6 +49,28 @@ class ExtractedAccount(BaseModel):
 
 
 class ExtractedHouseholdData(BaseModel):
+    # ── Subject identification ─────────────────────────────────────────
+    # Who the conversation is about (the client). Used by the service layer
+    # to guard against audio being applied to the wrong household — if the
+    # advisor uploads a recording about Client A onto Client B's page,
+    # `subject_name` won't match and we refuse to apply updates.
+    subject_name: str | None = None
+    # True when the transcript self-identifies as a first meeting / new
+    # prospect ("new client", "first meeting", "prospect", etc.). A strong
+    # signal that this audio should NOT be enriching an existing household.
+    is_new_client_intro: bool = False
+    # Does the transcript's subject (client) match the target household the
+    # advisor uploaded this audio to? The agent decides based on the household
+    # name + existing member names passed in the prompt context. Defaults to
+    # true so that if the model omits the field we don't wrongly block writes
+    # — the downstream `is_new_client_intro` check is the safety net.
+    subject_matches_household: bool = True
+    # Short human-readable reason behind `subject_matches_household` — shown
+    # to the advisor in the UI when we refuse to apply updates. Examples:
+    # "Transcript names Benjamin Walter; household is Stan and Barb Andersen."
+    # "Matches spouse name 'Barb Andersen'."
+    subject_match_reason: str | None = None
+
     # ── Household-level financials — null when not discussed ──────────
     income: Decimal | None = None
     net_worth: Decimal | None = None
@@ -77,14 +99,34 @@ audio_extraction_agent = Agent(
     system_prompt="""You extract structured household data from transcripts of advisor-client conversations.
 
 You will receive:
-- The household's CURRENT stored values (context — use to interpret relative statements like "bump it 10%", and to know what's already on record).
+- The TARGET HOUSEHOLD — the household the advisor uploaded this audio to. Includes the household name, existing member names, and current stored values.
 - A raw transcript (Whisper output, no speaker labels).
 
-Return an `ExtractedHouseholdData` JSON object with three layers:
+Return an `ExtractedHouseholdData` JSON object with four layers:
 
+0. SUBJECT IDENTIFICATION — `subject_name`, `is_new_client_intro`, `subject_matches_household`, `subject_match_reason`. Used downstream to REJECT transcripts that target the wrong household before any updates are written.
 1. HOUSEHOLD-LEVEL financial fields (scalar values on the household row).
 2. `members` — a list of every PERSON the conversation describes (the client, spouse, children). Capture name, DOB if stated, email, phone, relationship, address.
 3. `financial_accounts` — a list of every ACCOUNT or income-generating asset mentioned (401k, brokerage, rental property, bank accounts, etc.). Real-estate that generates income counts as an account (account_type = "Rental Property"). The rental's `account_value` is the PROPERTY value if stated; otherwise leave null. Monthly rental income belongs in household `expense_range`/notes, NOT in `account_value`.
+
+=== SUBJECT IDENTIFICATION ===
+
+- `subject_name`: the FULL name of the primary person this conversation is about (the client whose finances are being discussed). Use the name they GO BY, not their legal name. If it's a couple, use either spouse's name or the combined "Stan and Barb Andersen" form — whatever the advisor actually says. If truly unclear, leave null.
+
+- `is_new_client_intro`: true ONLY when the transcript self-identifies as a first/intro meeting — phrases like "new client", "new prospect", "first meeting", "initial consultation", "onboarding call", "just took him on", "prospect who reached out". Otherwise false. This flag is a strong signal that the recording should NOT be applied to an existing household.
+
+- `subject_matches_household`: decide whether the transcript's subject actually belongs to the TARGET HOUSEHOLD you were given. This is the most important correctness check — if it's false the advisor uploaded audio for the wrong person and we will REFUSE to apply any updates.
+    - TRUE when the transcript's subject matches the household name OR any existing member name. Match liberally — accept nicknames, married names, first-name-only mentions, combined forms, and spouse swaps:
+        * "Stan" / "Stanley" / "Stan Andersen" / "Stan and Barb" / "the Andersens" all match a household named "Stan and Barb Andersen" with members "Stanley Andersen" + "Barbara Andersen".
+        * "Barb" matches "Barbara Andersen".
+        * Last-name-only mentions ("the Andersens") match if the household name contains that last name.
+    - FALSE when the subject is clearly a DIFFERENT person. Examples:
+        * Target household "Stan and Barb Andersen"; transcript is about "Benjamin Walter" → false. Different first name, different last name, different person.
+        * Target household "Jane Doe"; transcript is about "new prospect Michael Chen" → false.
+    - If the TARGET HOUSEHOLD has no existing values/members (truly empty household row) AND `is_new_client_intro` is true AND the transcript's subject_name is a reasonable match for the household's name → TRUE (this is the intended "populate a freshly-created household" flow).
+    - If `subject_name` is null or you genuinely cannot tell → TRUE (default to permissive; don't block on ambiguity).
+
+- `subject_match_reason`: one short sentence (≤20 words) explaining the decision. Mention the transcript subject AND either the household/member name that matched (for true) or why no match was found (for false). Example: "Transcript names Benjamin Walter; target household is Stan and Barb Andersen — different person." or "Matches member 'Barbara Andersen' (spoken as 'Barb')."
 
 === HOUSEHOLD FIELDS ===
 
@@ -141,11 +183,15 @@ Return an `ExtractedHouseholdData` JSON object with three layers:
 
 === FEW-SHOT EXAMPLES ===
 
-Example A — numeric updates with provenance:
-Existing: {income: null, net_worth: null, risk_tolerance: null}
-Transcript: "Yeah our income's about two-fifty a year, and net worth is roughly three million. We're pretty aggressive — want growth."
+Example A — numeric updates with provenance (existing client, matches):
+Target household: "John and Mary Smith"; members: ["John Smith", "Mary Smith"]; existing values: {income: null, net_worth: null, risk_tolerance: null}
+Transcript: "Follow-up call with John Smith. Yeah our income's about two-fifty a year, and net worth is roughly three million. We're pretty aggressive — want growth."
 Output:
 {
+  "subject_name": "John Smith",
+  "is_new_client_intro": false,
+  "subject_matches_household": true,
+  "subject_match_reason": "Matches member 'John Smith' in target household.",
   "income": 250000,
   "net_worth": 3000000,
   "risk_tolerance": "Aggressive",
@@ -160,11 +206,15 @@ Output:
   "financial_accounts": []
 }
 
-Example B — new prospect, members + accounts:
-Existing: (no values yet)
+Example B — new prospect into a freshly-created household (matches):
+Target household: "Jane Doe"; members: []; existing values: (none)
 Transcript: "New client, Jane Doe, age 45. She's at 1200 Main St, Austin TX. Email jane@acme.com. She has a Schwab brokerage worth around 400k, and a Chase 401k from her old job. Risk is moderate."
 Output:
 {
+  "subject_name": "Jane Doe",
+  "is_new_client_intro": true,
+  "subject_matches_household": true,
+  "subject_match_reason": "Transcript subject 'Jane Doe' matches the target household name; empty household accepting intro.",
   "risk_tolerance": "Moderate",
   "quotes": { "risk_tolerance": "Risk is moderate" },
   "members": [
@@ -193,11 +243,15 @@ Output:
   ]
 }
 
-Example C — relative update:
-Existing: {income: 200000, goals: "Save for college"}
-Transcript: "Bump my income by ten percent for this year's plan. Oh, and add a vacation home goal by 2030."
+Example C — relative update, nickname match:
+Target household: "Alexander Nguyen"; members: ["Alexander Nguyen"]; existing values: {income: 200000, goals: "Save for college"}
+Transcript: "Checking in with Alex. Bump my income by ten percent for this year's plan. Oh, and add a vacation home goal by 2030."
 Output:
 {
+  "subject_name": "Alex Nguyen",
+  "is_new_client_intro": false,
+  "subject_matches_household": true,
+  "subject_match_reason": "'Alex' is a nickname for member 'Alexander Nguyen'.",
   "income": 220000,
   "goals": "Save for college; vacation home by 2030",
   "quotes": {
@@ -206,16 +260,45 @@ Output:
   }
 }
 
+Example D — MISMATCH: transcript is about a different person. Extract nothing that would corrupt the household.
+Target household: "Stan and Barb Andersen"; members: ["Stanley Andersen", "Barbara Andersen"]; existing values: {income: 200000, net_worth: 5000000}
+Transcript: "Completed my first meeting with a new client prospect, Benjamin Walter. His full legal name is Benjamin Walter Thompson Jr. He's 51 years old and currently residing in Austin, Texas. Annual income is about 75k."
+Output:
+{
+  "subject_name": "Benjamin Walter",
+  "is_new_client_intro": true,
+  "subject_matches_household": false,
+  "subject_match_reason": "Transcript describes new prospect 'Benjamin Walter'; target household is Stan and Barb Andersen — different person.",
+  "income": null,
+  "net_worth": null,
+  "quotes": {},
+  "members": [],
+  "financial_accounts": []
+}
+(Note: when `subject_matches_household` is false you should STILL leave scalar fields and lists empty/null — the service will refuse to apply anyway, and returning empty data makes the intent unambiguous.)
+
 === OUTPUT ===
 
 Return ONLY the JSON object conforming to `ExtractedHouseholdData`.""",
 )
 
 
-def build_extraction_prompt(household_context: dict, transcript: str) -> str:
+def build_extraction_prompt(
+    household_context: dict,
+    transcript: str,
+    household_name: str | None = None,
+    member_names: list[str] | None = None,
+) -> str:
     """
-    Assemble the user prompt: current household values + transcript.
-    Passed to the agent on each run.
+    Assemble the user prompt.
+
+    - `household_name` and `member_names` identify the TARGET household so the
+      agent can populate `subject_matches_household` / `subject_match_reason`.
+      They are optional only for backward compatibility; callers should pass
+      them.
+    - `household_context` carries current scalar values so the agent can
+      interpret relative statements ("bump income 10%").
+    - `transcript` is the Whisper output.
     """
     context_lines = []
     for k, v in household_context.items():
@@ -224,7 +307,16 @@ def build_extraction_prompt(household_context: dict, transcript: str) -> str:
         context_lines.append(f"  {k}: {v}")
     context_text = "\n".join(context_lines) if context_lines else "  (no values yet)"
 
+    hh_name_line = household_name or "(unknown — treat as permissive match)"
+    if member_names:
+        members_line = ", ".join(member_names)
+    else:
+        members_line = "(none on record yet)"
+
     return (
+        "=== TARGET HOUSEHOLD ===\n"
+        f"  name: {hh_name_line}\n"
+        f"  members: {members_line}\n\n"
         "=== CURRENT HOUSEHOLD VALUES ===\n"
         f"{context_text}\n\n"
         "=== TRANSCRIPT ===\n"

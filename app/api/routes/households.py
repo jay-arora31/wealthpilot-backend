@@ -114,6 +114,7 @@ async def upload_audio(
     household_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    force: bool = False,
     household_repo: HouseholdRepository = Depends(get_household_repo),
 ):
     # Validate household exists before queuing the background job
@@ -160,7 +161,9 @@ async def upload_audio(
                     file=io.BytesIO(content),
                     headers=headers,
                 )
-                result = await svc.process_audio(household_id, fake_file, job_id=job_id)
+                result = await svc.process_audio(
+                    household_id, fake_file, job_id=job_id, force=force
+                )
             job_store.mark_done(job_id, result)
             logfire.info("route.upload_audio_done", job_id=job_id, result=result)
         except Exception as exc:

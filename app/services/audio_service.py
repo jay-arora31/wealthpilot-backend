@@ -94,6 +94,7 @@ class AudioService:
         household_id: uuid.UUID,
         file: UploadFile,
         job_id: str | None = None,
+        force: bool = False,
     ) -> dict:
         def _step(msg: str) -> None:
             if job_id:
@@ -143,8 +144,10 @@ class AudioService:
         if word_count < MIN_TRANSCRIPT_WORDS:
             _step("Transcript too short to extract anything — skipping extraction.")
             return {
+                "status": "empty_transcript",
                 "transcript_text": transcript_text,
                 "updates_applied": 0,
+                "applied_updates": [],
                 "conflicts_created": 0,
                 "members_added": 0,
                 "accounts_added": 0,
@@ -152,7 +155,16 @@ class AudioService:
 
         _step("Running GPT extraction with household context…")
         household_context = {f: getattr(household, f) for f in FINANCIAL_FIELDS}
-        prompt = build_extraction_prompt(household_context, transcript_text)
+        # Pass existing members so the agent can decide whether the transcript's
+        # subject actually belongs to this household (match check).
+        existing_members = await self.member_repo.list_by_household(household_id)
+        member_names = [m.name for m in existing_members if m.name]
+        prompt = build_extraction_prompt(
+            household_context,
+            transcript_text,
+            household_name=household.name,
+            member_names=member_names,
+        )
 
         with logfire.span("audio.gpt_extraction", household_id=str(household_id)):
             result = await audio_extraction_agent.run(prompt)
@@ -164,8 +176,43 @@ class AudioService:
             f"{len(extracted.financial_accounts)} account(s)"
         )
 
+        # ── SUBJECT-MATCH GUARD ─────────────────────────────────────
+        # Refuse to apply anything when the transcript's subject doesn't match
+        # this household (e.g. advisor uploaded a recording about a different
+        # client). `force=True` is the advisor-override escape hatch.
+        if not force and not extracted.subject_matches_household:
+            reason = (
+                extracted.subject_match_reason
+                or "Transcript subject does not match this household."
+            )
+            logfire.warning(
+                "audio.subject_mismatch_refused",
+                household_id=str(household_id),
+                household_name=household.name,
+                detected_subject=extracted.subject_name,
+                is_new_client_intro=extracted.is_new_client_intro,
+                reason=reason,
+            )
+            _step(
+                f"⚠ Subject mismatch — no updates applied. "
+                f"Detected subject: {extracted.subject_name or 'unknown'}. "
+                f"Reason: {reason}"
+            )
+            return {
+                "status": "mismatch",
+                "transcript_text": transcript_text,
+                "detected_subject": extracted.subject_name,
+                "is_new_client_intro": extracted.is_new_client_intro,
+                "reason": reason,
+                "updates_applied": 0,
+                "applied_updates": [],
+                "conflicts_created": 0,
+                "members_added": 0,
+                "accounts_added": 0,
+            }
+
         # ── 1. Household-level fields ───────────────────────────────
-        updates_applied, conflicts_created = await self._apply_household_fields(
+        updates_applied, conflicts_created, applied_updates = await self._apply_household_fields(
             household_id, household, extracted, _step
         )
 
@@ -210,8 +257,12 @@ class AudioService:
         )
 
         return {
+            "status": "applied",
             "transcript_text": transcript_text,
+            "detected_subject": extracted.subject_name,
+            "is_new_client_intro": extracted.is_new_client_intro,
             "updates_applied": updates_applied,
+            "applied_updates": applied_updates,
             "conflicts_created": conflicts_created,
             "members_added": members_added,
             "accounts_added": accounts_added,
@@ -223,11 +274,18 @@ class AudioService:
         household,
         extracted: ExtractedHouseholdData,
         _step,
-    ) -> tuple[int, int]:
-        """Apply direct updates for empty fields, raise conflicts for differing ones."""
+    ) -> tuple[int, int, list[dict]]:
+        """Apply direct updates for empty fields, raise conflicts for differing ones.
+
+        Returns (updates_applied, conflicts_created, applied_updates) where
+        `applied_updates` is a list of {field, value} dicts — one per field we
+        actually wrote. The frontend shows this so the advisor can see WHAT
+        changed without scrolling through the live processing log.
+        """
         updates_applied = 0
         conflicts_created = 0
         direct_updates: dict = {}
+        applied_updates: list[dict] = []
 
         for field in FINANCIAL_FIELDS:
             incoming_val = getattr(extracted, field)
@@ -239,6 +297,7 @@ class AudioService:
             if existing_val is None:
                 direct_updates[field] = incoming_val
                 updates_applied += 1
+                applied_updates.append({"field": field, "value": str(incoming_val)})
                 _step(f"Applying new value → {field}: {incoming_val}")
                 continue
 
@@ -260,7 +319,7 @@ class AudioService:
         if direct_updates:
             await self.household_repo.update(household_id, direct_updates, commit=False)
 
-        return updates_applied, conflicts_created
+        return updates_applied, conflicts_created, applied_updates
 
     async def _apply_members(
         self,

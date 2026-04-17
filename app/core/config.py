@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # Comma-separated list of allowed CORS origins.
     # Defaults to localhost dev server; override in production via env var.
     ALLOWED_ORIGINS: str = "http://localhost:5173"
+    # Optional regex matching additional allowed origins — useful for Vercel
+    # preview URLs (each PR gets its own subdomain). Leave blank to disable.
+    # Example: r"https://wealthpilot-frontend-.*\.vercel\.app"
+    ALLOWED_ORIGIN_REGEX: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
