@@ -1,3 +1,5 @@
+import logging
+
 import logfire
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,15 +8,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings  # noqa: F401 — side-effect: sets env vars
 from app.api.routes import accounts, bank_details, conflicts, households, jobs, members
 
-logfire.configure(
-    token=settings.LOGFIRE_API_KEY or None,
-    service_name="fasttrackr-ai-backend",
-    send_to_logfire=bool(settings.LOGFIRE_API_KEY),
-)
+logger = logging.getLogger(__name__)
+
+try:
+    logfire.configure(
+        token=settings.LOGFIRE_API_KEY or None,
+        service_name="fasttrackr-ai-backend",
+        send_to_logfire=bool(settings.LOGFIRE_API_KEY),
+    )
+except Exception as exc:  # never let monitoring setup crash the app
+    logger.warning("logfire setup failed (continuing without it): %s", exc)
 
 app = FastAPI(title="FastTrackr AI", version="0.1.0")
 
-logfire.instrument_fastapi(app, capture_headers=True)
+try:
+    logfire.instrument_fastapi(app, capture_headers=True)
+except Exception as exc:
+    logger.warning("logfire FastAPI instrumentation failed: %s", exc)
 
 app.add_middleware(
     CORSMiddleware,
