@@ -1,5 +1,6 @@
 import uuid
 
+import logfire
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_account_repo
@@ -35,6 +36,7 @@ def _build_response(acc, ownerships_override=None) -> AccountResponse:
 @router.get("/households/{household_id}/accounts", response_model=list[AccountResponse])
 async def list_accounts(household_id: uuid.UUID, repo: AccountRepository = Depends(get_account_repo)):
     accounts = await repo.list_by_household(household_id)
+    logfire.info("account.list_returned", household_id=str(household_id), count=len(accounts))
     return [_build_response(acc) for acc in accounts]
 
 
@@ -45,6 +47,7 @@ async def create_account(
     repo: AccountRepository = Depends(get_account_repo),
 ):
     account = await repo.create(household_id, data)
+    logfire.info("account.created", household_id=str(household_id), account_id=str(account.id))
     ownerships = [
         OwnershipResponse(
             id=o.id,
@@ -65,7 +68,9 @@ async def update_account(
 ):
     updated = await repo.update(account_id, data.model_dump(exclude_unset=True))
     if not updated:
+        logfire.warning("account.not_found_on_update", account_id=str(account_id))
         raise HTTPException(status_code=404, detail="Account not found")
+    logfire.info("account.updated", account_id=str(account_id))
     return _build_response(updated)
 
 
@@ -76,5 +81,7 @@ async def delete_account(
 ):
     account = await repo.get_by_id(account_id)
     if not account:
+        logfire.warning("account.not_found_on_delete", account_id=str(account_id))
         raise HTTPException(status_code=404, detail="Account not found")
     await repo.delete(account_id)
+    logfire.info("account.deleted", account_id=str(account_id))

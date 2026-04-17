@@ -1,13 +1,24 @@
+import logfire
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# config must be imported first so LOGFIRE_TOKEN is set in the environment
+from app.core.config import settings  # noqa: F401 — side-effect: sets env vars
 from app.api.routes import accounts, bank_details, conflicts, households, jobs, members
+
+logfire.configure(
+    token=settings.LOGFIRE_API_KEY or None,
+    service_name="fasttrackr-ai-backend",
+    send_to_logfire=bool(settings.LOGFIRE_API_KEY),
+)
 
 app = FastAPI(title="FastTrackr AI", version="0.1.0")
 
+logfire.instrument_fastapi(app, capture_headers=True)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,3 +1,5 @@
+import logfire
+
 from app.repositories.insight_repo import InsightRepository
 from app.schemas.insight import InsightsResponse
 
@@ -6,6 +8,7 @@ class InsightService:
     def __init__(self, repo: InsightRepository) -> None:
         self.repo = repo
 
+    @logfire.instrument("insight.get_insights")
     async def get_insights(self) -> InsightsResponse:
         income_vs_expenses = await self.repo.income_vs_expenses()
         net_worth = await self.repo.net_worth_breakdown()
@@ -16,6 +19,7 @@ class InsightService:
         top_households_by_wealth = await self.repo.top_households_by_wealth()
         liquidity_ratios = await self.repo.liquidity_ratios()
 
+        logfire.info("insight.queries_complete")
         return InsightsResponse(
             income_vs_expenses=income_vs_expenses,
             net_worth=net_worth,

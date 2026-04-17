@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 
+import logfire
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 
 from app.api.deps import get_household_service, get_household_repo, get_insight_service
@@ -48,6 +49,7 @@ async def upload_excel(
     job_id = job_store.create_job("excel")
     job_store.update_job(job_id, status="running")
     job_store.append_step(job_id, f"Received: {filename}")
+    logfire.info("route.upload_excel_accepted", filename=filename, job_id=job_id)
 
     async def _run():
         import io
@@ -77,7 +79,9 @@ async def upload_excel(
                 )
                 result = await svc.process_excel(fake_file, job_id=job_id)
             job_store.mark_done(job_id, result)
+            logfire.info("route.upload_excel_done", job_id=job_id, result=result)
         except Exception as exc:
+            logfire.error("route.upload_excel_failed", job_id=job_id, error=str(exc))
             job_store.mark_failed(job_id, str(exc))
 
     background_tasks.add_task(_run)
@@ -126,6 +130,7 @@ async def upload_audio(
     job_id = job_store.create_job("audio")
     job_store.update_job(job_id, status="running")
     job_store.append_step(job_id, f"Received: {filename}")
+    logfire.info("route.upload_audio_accepted", household_id=str(household_id), filename=filename, job_id=job_id)
 
     async def _run():
         import io
@@ -149,7 +154,9 @@ async def upload_audio(
                 )
                 result = await svc.process_audio(household_id, fake_file, job_id=job_id)
             job_store.mark_done(job_id, result)
+            logfire.info("route.upload_audio_done", job_id=job_id, result=result)
         except Exception as exc:
+            logfire.error("route.upload_audio_failed", job_id=job_id, error=str(exc))
             job_store.mark_failed(job_id, str(exc))
 
     background_tasks.add_task(_run)

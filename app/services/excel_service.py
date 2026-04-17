@@ -1,6 +1,7 @@
 import io
 from decimal import Decimal, InvalidOperation
 
+import logfire
 from fastapi import UploadFile
 
 from app.agents.column_mapping import (
@@ -137,6 +138,7 @@ class ExcelService:
         self.bank_detail_repo = bank_detail_repo
         self.conflict_service = conflict_service
 
+    @logfire.instrument("excel.process_excel", extract_args=False)
     async def process_excel(self, file: UploadFile, job_id: str | None = None) -> dict:
         import openpyxl
 
@@ -144,6 +146,7 @@ class ExcelService:
             if job_id:
                 job_store.append_step(job_id, msg)
 
+        logfire.info("excel.upload_received", filename=file.filename, job_id=job_id)
         _step("Reading file…")
         content = await file.read()
 
@@ -176,14 +179,16 @@ class ExcelService:
             _step(f"Running AI column mapping on '{sheet_name}'…")
 
             sample_rows = [list(r) for r in rows[1:6]]
-            result = await column_mapping_agent.run(
-                f"Headers: {headers}\nSample rows: {sample_rows}"
-            )
+            with logfire.span("excel.column_mapping_ai", sheet=sheet_name):
+                result = await column_mapping_agent.run(
+                    f"Headers: {headers}\nSample rows: {sample_rows}"
+                )
             proposed: ColumnMapping = result.output
 
             _step(f"Reviewing AI mapping on '{sheet_name}'…")
             review_rows = [list(r) for r in rows[1:11]]
-            reviewed: ColumnMapping = await review_mapping(proposed, headers, review_rows)
+            with logfire.span("excel.column_mapping_review", sheet=sheet_name):
+                reviewed: ColumnMapping = await review_mapping(proposed, headers, review_rows)
             mapping: ColumnMapping = normalize_mapping(reviewed)
 
             display = mapping_to_display(mapping, headers)
@@ -431,6 +436,12 @@ class ExcelService:
             "conflicts": conflicts_count,
             "column_mappings": all_mappings,
         }
+        logfire.info(
+            "excel.processing_complete",
+            created=created,
+            enriched=enriched,
+            conflicts=conflicts_count,
+        )
         _step(
             f"Done — {created} created, {enriched} enriched, {conflicts_count} conflict{'s' if conflicts_count != 1 else ''}"
         )

@@ -1,6 +1,7 @@
 import uuid
 from decimal import Decimal, InvalidOperation
 
+import logfire
 from fastapi import HTTPException
 
 from app.repositories.conflict_repo import ConflictRepository
@@ -27,10 +28,14 @@ class ConflictService:
         self.conflict_repo = conflict_repo
         self.household_repo = household_repo
 
+    @logfire.instrument("conflict.list_pending", extract_args=True)
     async def list_pending(self, household_id: uuid.UUID) -> list[ConflictResponse]:
         conflicts = await self.conflict_repo.list_pending_by_household(household_id)
-        return [ConflictResponse.model_validate(c) for c in conflicts]
+        result = [ConflictResponse.model_validate(c) for c in conflicts]
+        logfire.info("conflict.list_returned", household_id=str(household_id), count=len(result))
+        return result
 
+    @logfire.instrument("conflict.create", extract_args=False)
     async def create_conflict(
         self,
         household_id: uuid.UUID,
@@ -48,11 +53,20 @@ class ConflictService:
             source=source,
             source_quote=source_quote,
         )
+        logfire.info(
+            "conflict.created",
+            household_id=str(household_id),
+            conflict_id=str(conflict.id),
+            field=field,
+            source=source,
+        )
         return ConflictResponse.model_validate(conflict)
 
+    @logfire.instrument("conflict.resolve", extract_args=True)
     async def resolve_conflict(self, conflict_id: uuid.UUID, action: str) -> ConflictResponse:
         conflict = await self.conflict_repo.get_by_id(conflict_id)
         if not conflict:
+            logfire.warning("conflict.not_found", conflict_id=str(conflict_id))
             raise HTTPException(status_code=404, detail="Conflict not found")
 
         if action == "accept":
@@ -62,4 +76,11 @@ class ConflictService:
             )
 
         resolved = await self.conflict_repo.resolve(conflict_id, action)
+        logfire.info(
+            "conflict.resolved",
+            conflict_id=str(conflict_id),
+            action=action,
+            field=conflict.field_name,
+            household_id=str(conflict.household_id),
+        )
         return ConflictResponse.model_validate(resolved)

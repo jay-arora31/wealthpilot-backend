@@ -14,6 +14,7 @@ Audio ingestion pipeline.
 import uuid
 from decimal import Decimal, InvalidOperation
 
+import logfire
 from fastapi import HTTPException, UploadFile
 from openai import AsyncOpenAI
 
@@ -68,6 +69,7 @@ class AudioService:
         self.conflict_service = conflict_service
         self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
+    @logfire.instrument("audio.process_audio", extract_args=False)
     async def process_audio(
         self,
         household_id: uuid.UUID,
@@ -78,6 +80,12 @@ class AudioService:
             if job_id:
                 job_store.append_step(job_id, msg)
 
+        logfire.info(
+            "audio.upload_received",
+            household_id=str(household_id),
+            filename=file.filename,
+            job_id=job_id,
+        )
         household = await self.household_repo.get_by_id(household_id)
         if not household:
             raise ValueError(f"Household {household_id} not found")
@@ -103,12 +111,14 @@ class AudioService:
             )
 
         _step(f"File size: {size // 1024} KB — sending to Whisper…")
-        transcription = await self.openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(file.filename or "audio.mp3", audio_bytes, file.content_type or "audio/mpeg"),
-        )
+        with logfire.span("audio.whisper_transcription", size_kb=size // 1024):
+            transcription = await self.openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(file.filename or "audio.mp3", audio_bytes, file.content_type or "audio/mpeg"),
+            )
         transcript_text = (transcription.text or "").strip()
         word_count = len(transcript_text.split())
+        logfire.info("audio.transcription_complete", word_count=word_count)
         _step(f"Transcription complete — {word_count} words")
 
         if word_count < MIN_TRANSCRIPT_WORDS:
@@ -123,7 +133,8 @@ class AudioService:
         household_context = {f: getattr(household, f) for f in FINANCIAL_FIELDS}
         prompt = build_extraction_prompt(household_context, transcript_text)
 
-        result = await audio_extraction_agent.run(prompt)
+        with logfire.span("audio.gpt_extraction", household_id=str(household_id)):
+            result = await audio_extraction_agent.run(prompt)
         extracted: ExtractedHouseholdData = result.output
         _step("Extraction complete — comparing against existing data…")
 
@@ -161,6 +172,12 @@ class AudioService:
         if direct_updates:
             await self.household_repo.update(household_id, direct_updates)
 
+        logfire.info(
+            "audio.processing_complete",
+            household_id=str(household_id),
+            updates_applied=updates_applied,
+            conflicts_created=conflicts_created,
+        )
         _step(
             f"Done — {updates_applied} update{'s' if updates_applied != 1 else ''} applied, "
             f"{conflicts_created} conflict{'s' if conflicts_created != 1 else ''} flagged"

@@ -1,5 +1,6 @@
 import uuid
 
+import logfire
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_member_repo, get_member_service
@@ -32,7 +33,9 @@ async def update_member(
 ):
     updated = await repo.update(member_id, data.model_dump(exclude_unset=True))
     if not updated:
+        logfire.warning("member.not_found_on_update", member_id=str(member_id))
         raise HTTPException(status_code=404, detail="Member not found")
+    logfire.info("member.updated", member_id=str(member_id))
     return updated
 
 
@@ -43,5 +46,7 @@ async def delete_member(
 ):
     member = await repo.get_by_id(member_id)
     if not member:
+        logfire.warning("member.not_found_on_delete", member_id=str(member_id))
         raise HTTPException(status_code=404, detail="Member not found")
     await repo.delete(member_id)
+    logfire.info("member.deleted", member_id=str(member_id))

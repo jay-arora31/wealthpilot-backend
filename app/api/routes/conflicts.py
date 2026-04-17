@@ -1,5 +1,6 @@
 import uuid
 
+import logfire
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_conflict_service
@@ -11,6 +12,7 @@ router = APIRouter()
 
 @router.get("/households/{household_id}/conflicts", response_model=list[ConflictResponse])
 async def list_conflicts(household_id: uuid.UUID, service: ConflictService = Depends(get_conflict_service)):
+    logfire.info("route.list_conflicts", household_id=str(household_id))
     return await service.list_pending(household_id)
 
 
@@ -20,4 +22,5 @@ async def resolve_conflict(
     data: ConflictResolveRequest,
     service: ConflictService = Depends(get_conflict_service),
 ):
+    logfire.info("route.resolve_conflict", conflict_id=str(conflict_id), action=data.action)
     return await service.resolve_conflict(conflict_id, data.action)
