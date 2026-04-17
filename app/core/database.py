@@ -21,8 +21,12 @@ logger = logging.getLogger(__name__)
 #   - Prepared statements are disabled (statement_cache_size=0) because each
 #     transaction may land on a different backend — prepared statements would
 #     fail with "prepared statement does not exist".
-#   - jit=off removes 100-300ms of planning overhead on small OLTP queries.
 #   - Short timeouts so a dead TCP connection fails fast instead of hanging.
+#
+# Note: do NOT pass server_settings (e.g. jit=off) here — pgbouncer only
+# allows a small whitelist of startup parameters and rejects the connection
+# otherwise ("unsupported startup parameter"). Set such tuning via
+# ALTER ROLE / ALTER DATABASE in Postgres directly if needed.
 #
 # Alembic migrations should use the direct connection (port 5432), NOT this
 # pooler — pgbouncer doesn't support advisory locks used by migrations.
@@ -39,7 +43,6 @@ engine = create_async_engine(
         "prepared_statement_cache_size": 0,
         "timeout": 10,
         "command_timeout": 30,
-        "server_settings": {"jit": "off"},
     },
 )
 
